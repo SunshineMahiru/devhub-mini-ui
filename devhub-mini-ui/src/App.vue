@@ -21,8 +21,8 @@
       </div>
     </header>
 
-    <main class="max-w-7xl mx-auto p-6 md:p-8">
-      <el-empty v-if="snippets.length === 0" description="暂无代码资产，点击右上角新建" class="mt-20" />
+    <main class="max-w-7xl mx-auto p-6 md:p-8" v-loading="loading" element-loading-text="正在从 Apifox 同步数据...">
+      <el-empty v-if="snippets.length === 0 && !loading" description="暂无代码资产，点击右上角新建" class="mt-20" />
 
       <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         <el-card
@@ -49,7 +49,10 @@
             <pre class="text-emerald-400 text-xs font-mono overflow-x-auto whitespace-pre-wrap m-0 leading-relaxed"><code>{{ snippet.code }}</code></pre>
           </div>
 
-          <div class="px-5 py-3 bg-white flex justify-end">
+          <div class="px-5 py-3 bg-white flex justify-end gap-2">
+            <el-button type="primary" link size="small" class="!font-medium" @click="handleEdit(snippet.id)">
+              编辑片段
+            </el-button>
             <el-popconfirm
               title="危险操作：确定要删除吗？"
               confirm-button-text="删除"
@@ -68,7 +71,7 @@
 
     <el-dialog
       v-model="dialogVisible"
-      title="✨ 沉淀代码资产"
+      :title="formData.id ? '✏️ 编辑代码资产' : '✨ 沉淀代码资产'"
       width="90%"
       style="max-width: 500px; border-radius: 16px;"
       destroy-on-close
@@ -82,12 +85,7 @@
         class="mt-2"
       >
         <el-form-item label="代码标题" prop="title">
-          <el-input
-            v-model="formData.title"
-            placeholder="例如：Axios 全局拦截器"
-            size="large"
-            class="!rounded-lg"
-          />
+          <el-input v-model="formData.title" placeholder="例如：Axios 全局拦截器" size="large" class="!rounded-lg" />
         </el-form-item>
 
         <el-form-item label="编程语言" prop="language">
@@ -101,21 +99,14 @@
         </el-form-item>
 
         <el-form-item label="代码正文" prop="code">
-          <el-input
-            v-model="formData.code"
-            type="textarea"
-            :rows="6"
-            placeholder="// 在此粘贴你的代码片段..."
-            resize="none"
-            class="font-mono"
-          />
+          <el-input v-model="formData.code" type="textarea" :rows="6" placeholder="// 在此粘贴你的代码片段..." resize="none" class="font-mono" />
         </el-form-item>
       </el-form>
 
       <template #footer>
         <div class="flex justify-end gap-2 pt-2">
-          <el-button size="large" class="!rounded-lg" @click="dialogVisible = false">取 消</el-button>
-          <el-button type="primary" size="large" class="!rounded-lg" @click="submitForm(formRef)">
+          <el-button size="large" class="!rounded-lg" @click="dialogVisible = false" :disabled="loading">取 消</el-button>
+          <el-button type="primary" size="large" class="!rounded-lg" @click="submitForm(formRef)" :loading="loading">
             保 存
           </el-button>
         </div>
@@ -125,42 +116,25 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+// ✨ 引入我们封装好的 API 接口层
+import { snippetApi } from './api/snippet' 
 
-// --- 1. 初始化数据 (✨ 彻底修复了 <\/script> 报错问题) ---
-const snippets = ref([
-  {
-    id: 1,
-    title: 'Axios 拦截器极简配置',
-    language: 'JavaScript',
-    code: 'axios.interceptors.response.use(\n  res => res.data,\n  err => {\n    if (err.response?.status === 401) {\n      localStorage.clear()\n      router.push("/login")\n    }\n    return Promise.reject(err)\n  }\n)'
-  },
-  {
-    id: 2,
-    title: 'Vue3 组合式 API 模板',
-    language: 'Vue',
-    // 这里的 <\/script> 加入了反斜杠，完美绕过了 Vite 编译器的误杀
-    code: '<script setup>\nimport { ref, reactive } from "vue"\n\nconst count = ref(0)\n<\/script>\n\n<template>\n  <div @click="count++">{{ count }}</div>\n</template>'
-  },
-  {
-    id: 3,
-    title: 'Tailwind 居中容器',
-    language: 'CSS',
-    code: '@layer utilities {\n  .flex-center {\n    @apply flex items-center justify-center;\n  }\n}'
-  }
-])
+// --- 1. 响应式状态声明 ---
+const snippets = ref([])
+const loading = ref(false) // 全局加载状态
 
-// --- 2. 表单与弹窗控制 ---
 const dialogVisible = ref(false)
 const formRef = ref(null)
 const formData = reactive({
+  id: null, // 新增 ID 字段，用于区分是新建还是编辑
   title: '',
   language: '',
   code: ''
 })
 
-// --- 3. 核心考点：原生表单校验规则 ---
+// --- 2. 核心考点：原生表单校验规则 ---
 const rules = reactive({
   title: [
     { required: true, message: '必须填写代码标题', trigger: 'blur' },
@@ -174,44 +148,98 @@ const rules = reactive({
   ]
 })
 
-// 打开弹窗重置数据
+// --- 3. 业务逻辑 (网络请求 CRUD) ---
+
+// 接口 1: 获取列表 (GET)
+const fetchSnippets = async () => {
+  loading.value = true
+  try {
+    const data = await snippetApi.getList()
+    // 兼容 Apifox 直接返回数组或被包裹的 data 对象
+    snippets.value = Array.isArray(data) ? data : (data.list || [])
+  } catch (error) {
+    console.error('获取列表失败', error)
+  } finally {
+    loading.value = false
+  }
+}
+
+// 页面挂载时拉取 Mock 数据
+onMounted(() => {
+  fetchSnippets()
+})
+
+// 打开弹窗 (重置数据)
 const openDialog = () => {
+  formData.id = null
   formData.title = ''
   formData.language = ''
   formData.code = ''
-  if (formRef.value) {
-    formRef.value.resetFields()
-  }
+  if (formRef.value) formRef.value.resetFields()
   dialogVisible.value = true
 }
 
-// --- 4. 业务逻辑 (CRUD) ---
-// 创建 (Create)
+// 接口 2: 获取单条详情并回显到表单 (GET)
+const handleEdit = async (id) => {
+  loading.value = true
+  try {
+    const data = await snippetApi.getOne(id)
+    formData.id = data.id || id
+    formData.title = data.title
+    formData.language = data.language
+    formData.code = data.code
+    dialogVisible.value = true
+  } catch (error) {
+    console.error('获取详情失败', error)
+  } finally {
+    loading.value = false
+  }
+}
+
+// 接口 3 & 4: 提交表单 (新增 POST / 更新 PUT)
 const submitForm = async (formEl) => {
   if (!formEl) return
-  await formEl.validate((valid) => {
+  await formEl.validate(async (valid) => {
     if (valid) {
-      snippets.value.unshift({
-        id: Date.now(),
-        title: formData.title,
-        language: formData.language,
-        code: formData.code
-      })
-      dialogVisible.value = false
-      ElMessage({ message: '✨ 代码资产沉淀成功！', type: 'success' })
+      loading.value = true
+      try {
+        if (formData.id) {
+          // 存在 ID，执行更新操作
+          await snippetApi.update(formData.id, formData)
+          ElMessage.success('✨ 代码资产更新成功！')
+        } else {
+          // 不存在 ID，执行新增操作
+          await snippetApi.create(formData)
+          ElMessage.success('✨ 代码资产沉淀成功！')
+        }
+        dialogVisible.value = false
+        await fetchSnippets() // 重新拉取列表
+      } catch (error) {
+        // 异常已在 Axios 拦截器中统一处理抛出提示
+      } finally {
+        loading.value = false
+      }
     } else {
       ElMessage.error('表单校验未通过，请检查红色提示项')
     }
   })
 }
 
-// 删除 (Delete)
-const deleteSnippet = (id) => {
-  snippets.value = snippets.value.filter(s => s.id !== id)
-  ElMessage.success('已将该代码片段移入回收站')
+// 接口 5: 删除代码片段 (DELETE)
+const deleteSnippet = async (id) => {
+  loading.value = true
+  try {
+    await snippetApi.remove(id)
+    ElMessage.success('已将该代码片段移入回收站')
+    await fetchSnippets() // 删除后刷新列表
+  } catch (error) {
+    console.error(error)
+  } finally {
+    loading.value = false
+  }
 }
 
-// 一键复制辅助功能 (提升前端逼真度)
+// 一键复制辅助功能
 const copyCode = async (text) => {
   try {
     await navigator.clipboard.writeText(text)
@@ -235,7 +263,7 @@ const getTagType = (lang) => {
 </script>
 
 <style>
-/* 全局覆盖 Element Plus 的默认弹窗圆角，使其无缝融入 Tailwind 风格 */
+/* 全局覆盖 Element Plus 的默认弹窗圆角 */
 .el-dialog {
   border-radius: 16px !important;
   overflow: hidden;
